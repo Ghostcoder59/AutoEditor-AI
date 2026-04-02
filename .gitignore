@@ -1,0 +1,25 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+.env
+
+# Build and IDE
+node_modules/
+dist/
+.vscode/
+.idea/
+
+# Large files and artifacts
+video_editor.exe
+*.dll
+highlights.mp4
+*.log
+*.exe
+*.dll
+venv/
+node_modules/
+.wdm/
+backend/uploads/
+*.mp4
