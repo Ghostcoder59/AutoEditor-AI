@@ -64,13 +64,3 @@ python main.py
 ⭐ Support
 
 If you like this project, give it a ⭐ on GitHub!
-
-🚀 IMPORTANT
-
-After pasting:
-
-Save README.md
-Run:
-git add README.md
-git commit -m "Fixed README formatting"
-git push
