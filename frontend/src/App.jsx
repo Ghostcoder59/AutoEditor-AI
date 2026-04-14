@@ -677,7 +677,16 @@ function App() {
           ...authHeaders(),
         },
       });
-      if (!response.ok) throw new Error('Failed to fetch status');
+      
+      if (!response.ok) {
+        let errorDetail = `HTTP ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorDetail = errorData.detail || errorDetail;
+        } catch {}
+        console.error(`[Status Check] Backend error: ${errorDetail}`);
+        throw new Error(errorDetail);
+      }
 
       const data = await response.json();
       setJobMeta({
@@ -708,10 +717,12 @@ function App() {
         setProgress((prev) => Math.min(prev + 8, 95));
         pollingRef.current = setTimeout(() => checkStatus(jobId), 3000);
       }
-    } catch {
+    } catch (error) {
       clearPolling();
       setStatus('ERROR');
-      setErrorMsg('Failed to check status. Is the backend running?');
+      const errorMsg = error?.message || 'Network error or backend unreachable';
+      console.error(`[Status Check] Error: ${errorMsg}`);
+      setErrorMsg(`Error: ${errorMsg}`);
     }
   };
 

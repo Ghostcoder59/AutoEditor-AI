@@ -18,6 +18,7 @@ from process_video import process_video
 import stripe
 import asyncio
 import yt_dlp
+import json
 from auth_db import (
     init_db,
     create_user,
@@ -40,7 +41,6 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-import json
 
 # YouTube OAuth settings
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
@@ -55,6 +55,39 @@ YOUTUBE_BACKEND_REDIRECT_URI = os.getenv(
 )
 
 jobs = {}
+OUTPUT_FOLDER = "output"
+UPLOAD_FOLDER = "uploads"
+
+
+def _job_dir(job_id: str) -> str:
+    return os.path.join(OUTPUT_FOLDER, job_id)
+
+
+def _job_status_path(job_id: str) -> str:
+    return os.path.join(_job_dir(job_id), "status.json")
+
+
+def _persist_job_state(job_id: str, payload: dict) -> None:
+    os.makedirs(_job_dir(job_id), exist_ok=True)
+    safe_payload = dict(payload)
+    safe_payload.pop("session_token", None)
+    safe_payload["job_id"] = job_id
+    with open(_job_status_path(job_id), "w", encoding="utf-8") as status_file:
+        json.dump(safe_payload, status_file, ensure_ascii=False, indent=2)
+
+
+def _load_persisted_job_state(job_id: str) -> dict | None:
+    status_path = _job_status_path(job_id)
+    if not os.path.exists(status_path):
+        return None
+    try:
+        with open(status_path, "r", encoding="utf-8") as status_file:
+            data = json.load(status_file)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        logger.exception("Failed to load persisted job state for %s", job_id)
+    return None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("autoeditor.api")
@@ -225,6 +258,7 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
             raise Exception("Could not download video. YouTube is blocking the request. Please ensure you are logged in to YouTube in Chrome or Edge and close the browser before trying again.")
             
         jobs[job_id]["stage"] = "processing downloaded video"
+        _persist_job_state(job_id, jobs[job_id])
         process_result = process_video(video_path, output_dir, use_ai=use_ai, export_format=export_format, video_filter=video_filter)
         output_video_path = process_result.get("output_video_path") if process_result else None
         summary_text = process_result.get("summary_text") if process_result else None
@@ -243,6 +277,7 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
                 "tokens_refunded": token_cost,
                 "tokens_balance": updated_tokens,
             })
+            _persist_job_state(job_id, jobs[job_id])
         else:
             current_user = get_user_by_token(session_token) if session_token else None
             jobs[job_id].update({
@@ -256,6 +291,7 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
                 "tokens_charged": token_cost,
                 "tokens_balance": current_user["tokens"] if current_user else None,
             })
+            _persist_job_state(job_id, jobs[job_id])
             
     except Exception as e:
         logger.exception("Job %s failed", job_id)
@@ -271,6 +307,7 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
             "tokens_refunded": token_cost,
             "tokens_balance": updated_tokens,
         })
+        _persist_job_state(job_id, jobs[job_id])
     finally:
         if video_path and os.path.exists(video_path):
             try:
@@ -303,6 +340,7 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
                 "owner_user_id": owner_user_id,
                 "session_token": session_token,
             }
+            _persist_job_state(job_id, jobs[job_id])
         else:
             current_user = get_user_by_token(session_token) if session_token else None
             jobs[job_id] = {
@@ -318,6 +356,7 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
                 "owner_user_id": owner_user_id,
                 "session_token": session_token,
             }
+            _persist_job_state(job_id, jobs[job_id])
             
     except Exception as e:
         logger.exception("Job %s failed", job_id)
@@ -335,6 +374,7 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
             "owner_user_id": owner_user_id,
             "session_token": session_token,
         }
+        _persist_job_state(job_id, jobs[job_id])
     finally:
         # Clean up the original upload
         if os.path.exists(video_path):
@@ -754,6 +794,7 @@ async def process_video_endpoint(
         "tokens_charged": PROCESS_TOKEN_COST,
         "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
+    _persist_job_state(unique_id, jobs[unique_id])
     logger.info(
         "Queued job %s by user %s (%s, %.2f MB)",
         unique_id,
@@ -806,6 +847,7 @@ async def process_url_endpoint(
         "tokens_charged": PROCESS_TOKEN_COST,
         "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
+    _persist_job_state(unique_id, jobs[unique_id])
     
     if background_tasks is None:
         raise HTTPException(status_code=500, detail="Background task manager is unavailable")
@@ -834,15 +876,36 @@ async def process_url_endpoint(
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str, authorization: str | None = Header(default=None)):
-    user = _require_user(authorization)
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if jobs[job_id].get("owner_user_id") != user["id"]:
-        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        user = _require_user(authorization)
+    except HTTPException as e:
+        logger.warning(f"[Status] Auth failed for job {job_id}: {e.detail}")
+        raise
+    
+    logger.info(f"[Status] Checking job {job_id} for user {user.get('id')}")
+    
+    job_state = jobs.get(job_id)
+    if not job_state:
+        logger.info(f"[Status] Job {job_id} not in memory, checking disk...")
+        job_state = _load_persisted_job_state(job_id)
+        if job_state:
+            logger.info(f"[Status] Job {job_id} loaded from disk, status={job_state.get('status')}")
+    else:
+        logger.info(f"[Status] Job {job_id} found in memory, status={job_state.get('status')}")
+    
+    if not job_state:
+        logger.warning(f"[Status] Job {job_id} not found (not in memory or disk)")
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found (not processing)")
+    
+    owner_id = job_state.get("owner_user_id")
+    if owner_id not in (None, user["id"]):
+        logger.warning(f"[Status] Job {job_id} ownership mismatch: owner={owner_id}, user={user['id']}")
+        raise HTTPException(status_code=403, detail="You do not have access to this job")
 
-    safe = dict(jobs[job_id])
+    safe = dict(job_state)
     safe.pop("owner_user_id", None)
     safe.pop("session_token", None)
+    logger.info(f"[Status] Returning status for job {job_id}: {safe.get('status')}")
     return safe
 
 @app.get("/download/{job_id}/{filename}")
