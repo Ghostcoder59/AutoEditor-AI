@@ -19,6 +19,7 @@ import stripe
 import asyncio
 import yt_dlp
 import json
+import traceback
 from auth_db import (
     init_db,
     create_user,
@@ -300,6 +301,8 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
             "status": "error",
             "stage": "failed",
             "message": str(e),
+            "error_detail": str(e),
+            "error_trace": traceback.format_exc(),
             "summary": None,
             "summary_data": None,
             "download_url": None,
@@ -365,6 +368,8 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
             "status": "error",
             "stage": "failed",
             "message": str(e),
+            "error_detail": str(e),
+            "error_trace": traceback.format_exc(),
             "summary": None,
             "summary_data": None,
             "download_url": None,

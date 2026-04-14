@@ -711,7 +711,7 @@ function App() {
       } else if (data.status === 'error') {
         clearPolling();
         setStatus('ERROR');
-        setErrorMsg(data.message || 'An error occurred during processing.');
+        setErrorMsg(data.error_detail || data.message || 'An error occurred during processing.');
       } else {
         setMessage(data.message || 'Analyzing audio & video...');
         setProgress((prev) => Math.min(prev + 8, 95));
