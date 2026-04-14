@@ -1,66 +1,42 @@
-🎬 Automated Video Editor (AI-Powered Highlight Generator)
+# Automated Video Editor
 
-An advanced Machine Learning project that automatically detects high-energy “cheering” moments from audio and video files and converts them into engaging highlight reels.
+Automated Video Editor is an AI-powered highlight generator that detects high-energy moments in long-form video and converts them into short highlight reels.
 
-By combining audio signal processing with intelligent classification, this system transforms raw media into concise, impactful content — perfect for sports, events, and digital media workflows.
+It combines audio analysis, computer vision, and a modern web UI so users can upload video, process highlights, and publish results with a token-based billing flow.
 
-🚀 Features
-🎧 Audio-Based Cheer Detection
-Extracts features like MFCC, spectral centroid, and zero-crossing rate using Librosa and classifies segments using a Random Forest model.
-📊 Waveform Visualization
-Displays audio signals with color-coded predictions (cheer vs non-cheer) for intuitive analysis.
-🎥 Automated Highlight Generation
-Detects key moments in videos and stitches them into a final highlight reel using MoviePy.
-⏱️ Segment-Level Precision
-Processes audio (1s) and video (2s) chunks to improve detection accuracy.
-💾 Model Persistence
-Saves trained models using Pickle for reuse and faster execution.
-🖥️ Flutter-Based Desktop UI
-Responsive Windows interface built with Flutter & Dart.
-🛠️ Tech Stack
-Languages
-Python
-Dart
-Libraries
-Scikit-learn
-Librosa
-MoviePy
-Matplotlib
-NumPy
-Tools
-FFmpeg
-Jupyter Notebook
-Flutter
-📂 Project Structure
-Automated-Video-Editor/
-│── backend/
-│── frontend/
-│── data/
-│── models/
-│── notebooks/
-│── README.md
-⚙️ Installation
-1. Clone the repository
-git clone https://github.com/Ghostcoder59/Automated_Video_Editing.git
-cd Automated-Video-Editor
-2. Install dependencies
+## Features
+
+- Audio-based cheer detection with machine learning
+- Automatic highlight reel generation
+- URL and file upload support
+- Token-based access control
+- Free trial, free daily allowance, and paid plan upgrades
+- YouTube publishing for eligible users
+
+## Project Structure
+
+- `backend/` FastAPI API, token billing, auth, processing, and deployment config
+- `frontend/` Vite React app with the editor, pricing, tokens, and account UI
+- `Model Training/` training assets and experimental code
+
+## Local Development
+
+Backend:
+
+```powershell
+cd backend
 pip install -r requirements.txt
-3. Install FFmpeg
+uvicorn main:app --reload --port 8000
+```
 
-Make sure FFmpeg is installed and added to your system PATH.
+Frontend:
 
-4. Run the project
-python main.py
-💡 Use Cases
-🏏 Sports highlight generation
-🎉 Event summarization
-🎥 Content creation automation
-📈 Audience engagement analysis
-🔮 Future Enhancements
-🤖 Deep Learning models (CNN/RNN)
-⚡ Real-time detection
-☁️ Cloud deployment
-🌍 Multi-language support
-⭐ Support
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
-If you like this project, give it a ⭐ on GitHub!
+## Deployment
+
+See [DEPLOY_FREE.md](DEPLOY_FREE.md) for the free Vercel + Render + Supabase deployment path.

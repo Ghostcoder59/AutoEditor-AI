@@ -23,3 +23,7 @@ node_modules/
 .wdm/
 backend/uploads/
 *.mp4
+backend/output/
+backend/app.db
+backend/client_secrets.json
+backend/*.wav

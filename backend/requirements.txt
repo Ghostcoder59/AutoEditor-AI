@@ -7,3 +7,11 @@ joblib==1.4.2
 numpy==1.26.4
 librosa==0.10.2.post1
 scipy==1.13.1
+stripe==11.6.0
+yt-dlp
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+python-dotenv
+supabase
+psycopg2-binary
