@@ -16,31 +16,18 @@ if USING_POSTGRES:
 DB_PATH = os.getenv("AUTH_DB_PATH", os.path.join(os.path.dirname(__file__), "app.db"))
 
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "60"))
-TRIAL_DAILY_TOKENS = int(os.getenv("TRIAL_DAILY_TOKENS", "400"))
-FREE_DAILY_TOKENS = int(os.getenv("FREE_DAILY_TOKENS", "100"))
-
-MONTHLY_PLAN_TOKENS = {
-    "plus": int(os.getenv("PLUS_MONTHLY_TOKENS", "2000")),
-    "pro": int(os.getenv("PRO_MONTHLY_TOKENS", "8000")),
-}
 
 PLAN_CATALOG = {
     "free": {
         "price_usd": 0.0,
-        "daily_tokens": FREE_DAILY_TOKENS,
-        "monthly_tokens": 0,
         "features": ["basic_processing", "standard_queue"],
     },
     "plus": {
         "price_usd": 4.99,
-        "daily_tokens": 0,
-        "monthly_tokens": MONTHLY_PLAN_TOKENS["plus"],
         "features": ["hd_export", "faster_queue", "premium_models"],
     },
     "pro": {
         "price_usd": 11.99,
-        "daily_tokens": 0,
-        "monthly_tokens": MONTHLY_PLAN_TOKENS["pro"],
         "features": ["4k_export", "priority_queue", "all_premium_models", "batch_jobs"],
     },
 }
@@ -128,7 +115,7 @@ def _build_user_payload(row: Any) -> dict:
     trial_active = bool(trial_ends_at and trial_ends_at > now)
     plan = row["plan"] or "free"
     billing_status = row["billing_status"] or "free"
-    paid_active = billing_status == "active" and plan in MONTHLY_PLAN_TOKENS
+    paid_active = billing_status == "active" and plan in {"plus", "pro"}
     effective_plan = "trial" if trial_active else (plan if paid_active else "free")
 
     return {
@@ -665,88 +652,7 @@ def deduct_tokens(user_id: int, token_cost: int) -> bool:
         return cursor.rowcount > 0
 
 def ensure_token_allowance(user_id: int, daily_amount: int | None = None):
-    now_ts = datetime.now(timezone.utc)
-    with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                id,
-                tokens,
-                plan,
-                billing_status,
-                trial_ends_at,
-                last_token_refresh,
-                monthly_tokens_reset_at
-            FROM users
-            WHERE id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        if not row:
-            return
-
-        trial_ends_at = _parse_utc(row["trial_ends_at"])
-        trial_active = bool(trial_ends_at and trial_ends_at > now_ts)
-        plan = row["plan"] or "free"
-        billing_status = row["billing_status"] or "free"
-        paid_active = billing_status == "active" and plan in MONTHLY_PLAN_TOKENS
-        tokens_now = int(row["tokens"])
-
-        if billing_status == "trial" and not trial_active:
-            conn.execute("UPDATE users SET billing_status = 'free' WHERE id = ?", (user_id,))
-            billing_status = "free"
-
-        if trial_active:
-            refill_floor = TRIAL_DAILY_TOKENS
-            reason = "daily_trial_refill"
-            due = _is_daily_refresh_due(row["last_token_refresh"], now_ts)
-            if due:
-                new_balance = max(tokens_now, refill_floor)
-                if new_balance != tokens_now:
-                    conn.execute(
-                        "UPDATE users SET tokens = ?, last_token_refresh = ? WHERE id = ?",
-                        (new_balance, now_ts.isoformat(), user_id),
-                    )
-                    _record_token_ledger(conn, user_id, new_balance - tokens_now, reason, new_balance)
-                else:
-                    conn.execute(
-                        "UPDATE users SET last_token_refresh = ? WHERE id = ?",
-                        (now_ts.isoformat(), user_id),
-                    )
-        elif paid_active:
-            monthly_floor = MONTHLY_PLAN_TOKENS[plan]
-            due = _is_monthly_refresh_due(row["monthly_tokens_reset_at"], now_ts)
-            if due:
-                new_balance = max(tokens_now, monthly_floor)
-                if new_balance != tokens_now:
-                    conn.execute(
-                        "UPDATE users SET tokens = ?, monthly_tokens_reset_at = ? WHERE id = ?",
-                        (new_balance, now_ts.isoformat(), user_id),
-                    )
-                    _record_token_ledger(conn, user_id, new_balance - tokens_now, f"monthly_{plan}_refill", new_balance)
-                else:
-                    conn.execute(
-                        "UPDATE users SET monthly_tokens_reset_at = ? WHERE id = ?",
-                        (now_ts.isoformat(), user_id),
-                    )
-        else:
-            refill_floor = int(daily_amount if daily_amount is not None else FREE_DAILY_TOKENS)
-            due = _is_daily_refresh_due(row["last_token_refresh"], now_ts)
-            if due:
-                new_balance = max(tokens_now, refill_floor)
-                if new_balance != tokens_now:
-                    conn.execute(
-                        "UPDATE users SET tokens = ?, last_token_refresh = ? WHERE id = ?",
-                        (new_balance, now_ts.isoformat(), user_id),
-                    )
-                    _record_token_ledger(conn, user_id, new_balance - tokens_now, "daily_free_refill", new_balance)
-                else:
-                    conn.execute(
-                        "UPDATE users SET last_token_refresh = ? WHERE id = ?",
-                        (now_ts.isoformat(), user_id),
-                    )
-
-        conn.commit()
+    return
 
 
 def add_tokens(
@@ -853,7 +759,6 @@ def get_youtube_token(user_id: int) -> str | None:
 def get_plan_catalog() -> dict:
     return {
         "trial_days": TRIAL_DAYS,
-        "trial_daily_tokens": TRIAL_DAILY_TOKENS,
         "plans": PLAN_CATALOG,
     }
 

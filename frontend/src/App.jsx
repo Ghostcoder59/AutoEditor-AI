@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import { motion as Motion, AnimatePresence, useMotionValue, useSpring, useTransform } from 'framer-motion';
 import {
   UploadCloud,
@@ -12,16 +12,12 @@ import {
   Clock3,
   FileVideo,
   LogOut,
-  Coins,
   Home,
   Film,
-  Wallet,
   User,
   Sun,
   Moon,
-  KeyRound,
   Mail,
-  Zap,
 } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -36,26 +32,29 @@ const formatBytes = (bytes) => {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[index]}`;
 };
 
+const formatSecondsLabel = (seconds) => {
+  const safeValue = Number(seconds);
+  if (!Number.isFinite(safeValue) || safeValue < 0) return '0:00';
+  const mins = Math.floor(safeValue / 60);
+  const secs = Math.floor(safeValue % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+const formatScorePct = (score) => `${Math.round(Math.max(0, Math.min(1, Number(score) || 0)) * 100)}%`;
+
 const DEFAULT_PLAN_CATALOG = {
   trial_days: 60,
-  trial_daily_tokens: 400,
   plans: {
     free: {
       price_usd: 0,
-      daily_tokens: 100,
-      monthly_tokens: 0,
       features: ['basic_processing', 'standard_queue'],
     },
     plus: {
       price_usd: 4.99,
-      daily_tokens: 0,
-      monthly_tokens: 2000,
       features: ['hd_export', 'faster_queue', 'premium_models'],
     },
     pro: {
       price_usd: 11.99,
-      daily_tokens: 0,
-      monthly_tokens: 8000,
       features: ['4k_export', 'priority_queue', 'all_premium_models', 'batch_jobs'],
     },
   },
@@ -65,32 +64,17 @@ const PLAN_COPY = {
   free: {
     title: 'Free',
     subtitle: 'Great for regular creators',
-    reasons: [
-      'Up to 100 free tokens every day',
-      'About 4 standard edits/day',
-      'Core highlight generation',
-      'Standard queue speed',
-    ],
+    reasons: ['Core highlight generation', 'Standard queue speed'],
   },
   plus: {
     title: 'Plus',
     subtitle: 'Best value for active users',
-    reasons: [
-      '2,000 tokens every month',
-      'Around 80 standard edits/month',
-      'Faster processing queue',
-      'Premium AI quality + HD exports',
-    ],
+    reasons: ['Faster processing queue', 'Premium AI quality + HD exports'],
   },
   pro: {
     title: 'Pro',
     subtitle: 'For power creators and teams',
-    reasons: [
-      '8,000 tokens every month',
-      'Around 320 standard edits/month',
-      'Priority queue for fastest turnaround',
-      'All advanced models + batch workflows + YouTube publish',
-    ],
+    reasons: ['Priority queue for fastest turnaround', 'All advanced models + batch workflows + YouTube publish'],
   },
 };
 
@@ -110,14 +94,6 @@ function App() {
   const [authMessage, setAuthMessage] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
-  const [pricing, setPricing] = useState({
-    process_token_cost: 25,
-    token_packs: [],
-    gateway: 'manual',
-    plans: DEFAULT_PLAN_CATALOG,
-  });
-  const [checkoutBusy, setCheckoutBusy] = useState(false);
-
   const [status, setStatus] = useState('IDLE'); // IDLE, UPLOADING, PROCESSING, SUCCESS, ERROR
   const [errorMsg, setErrorMsg] = useState('');
   const [downloadUrl, setDownloadUrl] = useState(null);
@@ -128,6 +104,8 @@ function App() {
   const [jobMeta, setJobMeta] = useState({ stage: '', processing_seconds: null, file_size_mb: null });
   const [videoSummary, setVideoSummary] = useState('');
   const [summaryMeta, setSummaryMeta] = useState(null);
+  const [liveWaveform, setLiveWaveform] = useState([]);
+  const [analysisProgress, setAnalysisProgress] = useState(null);
   const [urlInput, setUrlInput] = useState('');
   const [exportingYouTube, setExportingYouTube] = useState(false);
   const [useAi, setUseAi] = useState(true);
@@ -141,7 +119,6 @@ function App() {
 
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
-  const checkoutHandledRef = useRef(false);
   const pointerX = useMotionValue(0);
   const pointerY = useMotionValue(0);
   const orbX = useSpring(pointerX, { stiffness: 45, damping: 22, mass: 1.1 });
@@ -178,45 +155,6 @@ function App() {
   }, [token]);
 
   React.useEffect(() => {
-    const loadPricing = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/billing/pricing`);
-        if (!response.ok) return;
-        const data = await response.json();
-        setPricing(data);
-      } catch {
-        // Keep fallback pricing state
-      }
-    };
-    loadPricing();
-  }, []);
-
-  const confirmCheckout = useCallback(async (sessionId) => {
-    if (!token) return;
-    try {
-      const response = await fetch(`${API_BASE_URL}/billing/checkout-confirm`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ session_id: sessionId }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Checkout confirmation failed');
-      setUser((prev) => ({ ...prev, tokens: data.tokens_balance }));
-      setAuthMessage('Payment successful. Tokens were added to your wallet.');
-
-      const url = new URL(window.location.href);
-      url.searchParams.delete('checkout');
-      url.searchParams.delete('session_id');
-      window.history.replaceState({}, '', url.toString());
-    } catch (err) {
-      setAuthError(err.message || 'Checkout confirmation failed');
-    }
-  }, [token]);
-
-  React.useEffect(() => {
     const consent = localStorage.getItem('cookie_consent');
     if (!consent) {
       const timer = setTimeout(() => setShowCookieBanner(true), 2000);
@@ -229,14 +167,50 @@ function App() {
     setShowCookieBanner(false);
   };
 
+  const downloadTextFile = (content, filename, mimeType = 'text/plain;charset=utf-8') => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportVideoReport = () => {
+    if (!summaryMeta) {
+      setAuthError('No report is available yet. Process a video first.');
+      return;
+    }
+
+    const reportLines = [
+      'AutoEditor Pro Video Brief',
+      `Summary: ${videoSummary || 'No summary available.'}`,
+      `Subject: ${summaryMeta.subject_brief || 'Not detected'}`,
+      `Topics: ${Array.isArray(summaryMeta.topic_keywords) && summaryMeta.topic_keywords.length ? summaryMeta.topic_keywords.join(', ') : 'None detected'}`,
+      `Mode: ${summaryMeta.summary_mode || 'unknown'}`,
+      `Duration: ${summaryMeta.video_duration_seconds ?? 'unknown'}s`,
+      `Detected segments: ${summaryMeta.detected_segments ?? 0}`,
+      `Merged clusters: ${summaryMeta.merged_clusters ?? 0}`,
+      '',
+      'Timestamped Moments',
+      ...(Array.isArray(summaryMeta.best_moments) && summaryMeta.best_moments.length
+        ? summaryMeta.best_moments.map((moment) => `${moment.display_time} | ${moment.label}`)
+        : ['No moment labels available.']),
+      '',
+      'Export ready note: review the clip sequence before publishing.',
+    ];
+
+    downloadTextFile(reportLines.join('\n'), `autoeditor-brief-${Date.now()}.txt`);
+    setAuthMessage('Video brief report downloaded.');
+  };
+
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const tab = params.get('tab');
     const mode = params.get('mode');
     const tokenFromUrl = params.get('token');
-    const sessionId = params.get('session_id');
     const authStatus = params.get('auth');
-    const checkout = params.get('checkout');
 
     if (tab) setActiveTab(tab);
     if (mode) setAuthMode(mode);
@@ -244,11 +218,6 @@ function App() {
       setResetToken(tokenFromUrl);
       setAuthMode('reset');
       setActiveTab('account');
-    }
-
-    if (checkout === 'success' && sessionId && token && !checkoutHandledRef.current) {
-      checkoutHandledRef.current = true;
-      confirmCheckout(sessionId);
     }
 
     if (authStatus === 'youtube_success' && token) {
@@ -269,7 +238,7 @@ function App() {
       url.searchParams.delete('auth');
       window.history.replaceState({}, '', url.toString());
     }
-  }, [token, confirmCheckout]);
+  }, [token]);
 
   const authHeaders = () => {
     if (!token) return {};
@@ -295,6 +264,8 @@ function App() {
     setJobMeta({ stage: '', processing_seconds: null, file_size_mb: null });
     setVideoSummary('');
     setSummaryMeta(null);
+    setLiveWaveform([]);
+    setAnalysisProgress(null);
     setUrlInput('');
     setYoutubeUrl(null);
     setExportingYouTube(false);
@@ -306,7 +277,6 @@ function App() {
   const handleLogout = () => {
     clearPolling();
     localStorage.removeItem(TOKEN_KEY);
-    setToken(null);
     setToken(null);
     setUser(null);
     resetEditorState();
@@ -384,95 +354,6 @@ function App() {
     }
   };
 
-  const manualTopUp = async (amount) => {
-    setAuthError('');
-    try {
-      const response = await fetch(`${API_BASE_URL}/billing/topup`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        },
-        body: JSON.stringify({ tokens: amount }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Top-up failed');
-      setUser((prev) => ({ ...prev, tokens: data.tokens_balance }));
-      setAuthMessage(`Added ${data.tokens_added} tokens. New balance: ${data.tokens_balance}.`);
-    } catch (err) {
-      setAuthError(err.message || 'Could not top up tokens. Please login again and retry.');
-    }
-  };
-
-  const startCheckout = async (pack) => {
-    if (!token) {
-      setActiveTab('account');
-      setAuthMode('login');
-      setAuthError('Login first to purchase token packs.');
-      return;
-    }
-
-    if (pricing.gateway !== 'stripe') {
-      setAuthError('Stripe is not configured yet. Set STRIPE_SECRET_KEY in backend to enable real card payments.');
-      return;
-    }
-
-    setCheckoutBusy(true);
-    setAuthError('');
-    try {
-      const response = await fetch(`${API_BASE_URL}/billing/checkout-session`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        },
-        body: JSON.stringify({ tokens: pack.tokens }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not start checkout');
-      window.location.href = data.checkout_url;
-    } catch (err) {
-      setAuthError(err.message || 'Could not start checkout');
-    } finally {
-      setCheckoutBusy(false);
-    }
-  };
-
-  const changePlan = async (plan) => {
-    if (!token) {
-      setActiveTab('account');
-      setAuthMode('login');
-      setAuthError('Login first to upgrade your plan.');
-      return;
-    }
-
-    setCheckoutBusy(true);
-    setAuthError('');
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/billing/plan`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        },
-        body: JSON.stringify({ plan }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not update plan');
-      setUser(data.user);
-      setAuthMessage(plan === 'free' ? 'You are now on the Free plan.' : `Upgraded to ${plan[0].toUpperCase()}${plan.slice(1)}.`);
-    } catch (err) {
-      setAuthError(err.message || 'Could not update your plan right now.');
-    } finally {
-      setCheckoutBusy(false);
-    }
-  };
-
-  const instantDevTopUp = async (pack) => {
-    await manualTopUp(pack.tokens);
-  };
-
   const handleFileSelect = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -515,9 +396,6 @@ function App() {
       setStatus('PROCESSING');
       setProgress(35);
       setMessage(data.message || 'Upload complete. Starting analysis...');
-      if (data.tokens_balance !== undefined && user) {
-        setUser({ ...user, tokens: data.tokens_balance });
-      }
       checkStatus(data.job_id);
     } catch (error) {
       setStatus('ERROR');
@@ -554,9 +432,6 @@ function App() {
       setStatus('PROCESSING');
       setProgress(25);
       setMessage(data.message || 'Download started...');
-      if (data.tokens_balance !== undefined && user) {
-        setUser({ ...user, tokens: data.tokens_balance });
-      }
       checkStatus(data.job_id);
     } catch (error) {
       setStatus('ERROR');
@@ -697,6 +572,8 @@ function App() {
       });
       setVideoSummary(data.summary || '');
       setSummaryMeta(data.summary_data || null);
+      setLiveWaveform(Array.isArray(data.live_audio_waveform) ? data.live_audio_waveform : []);
+      setAnalysisProgress(typeof data.analysis_progress_pct === 'number' ? data.analysis_progress_pct : null);
 
       if (data.status === 'success') {
         clearPolling();
@@ -705,16 +582,18 @@ function App() {
         setMessage(data.message);
         setDownloadUrl(`${API_BASE_URL}${data.download_url}`);
         setVideoUrl(`${API_BASE_URL}${data.download_url}`);
-        if (data.tokens_balance !== undefined && user) {
-          setUser({ ...user, tokens: data.tokens_balance });
-        }
       } else if (data.status === 'error') {
         clearPolling();
         setStatus('ERROR');
         setErrorMsg(data.error_detail || data.message || 'An error occurred during processing.');
       } else {
         setMessage(data.message || 'Analyzing audio & video...');
-        setProgress((prev) => Math.min(prev + 8, 95));
+        if (typeof data.analysis_progress_pct === 'number') {
+          const pct = Math.max(0, Math.min(95, Math.round(data.analysis_progress_pct)));
+          setProgress((prev) => Math.max(prev, pct));
+        } else {
+          setProgress((prev) => Math.min(prev + 8, 95));
+        }
         pollingRef.current = setTimeout(() => checkStatus(jobId), 3000);
       }
     } catch (error) {
@@ -852,12 +731,7 @@ function App() {
             <div className="user-chip">
               <span>@{user.username}</span>
               <span>{user.email}</span>
-              <span><Coins size={16} /> {user.tokens} tokens</span>
             </div>
-          </div>
-
-          <div className="paywall-note">
-            Each video processing run costs {pricing.process_token_cost || 25} tokens.
           </div>
 
           <div className="ai-suite-card" style={{ 
@@ -1013,6 +887,10 @@ function App() {
     }
 
     if (status === 'UPLOADING' || status === 'PROCESSING') {
+      const waveformSamples = (Array.isArray(liveWaveform) ? liveWaveform : [])
+        .slice(-72)
+        .map((value) => Math.max(0, Math.min(1, Number(value) || 0)));
+
       return (
         <div className="loading-wrapper" style={{ animation: 'fadeIn 0.5s ease' }}>
           <div className="spinner"></div>
@@ -1029,7 +907,27 @@ function App() {
             <div className="progress-bar" style={{ width: `${progress}%` }}></div>
           </div>
           <p style={{ color: 'var(--text-muted)' }}>{progress}% complete</p>
+          {typeof analysisProgress === 'number' && (
+            <p style={{ color: 'var(--text-muted)' }}>Analysis progress: {Math.max(0, Math.min(100, Math.round(analysisProgress)))}%</p>
+          )}
           {jobMeta.stage && <p style={{ color: 'var(--text-muted)' }}>Stage: {jobMeta.stage}</p>}
+          {waveformSamples.length > 0 && (
+            <div className="live-wave-card">
+              <div className="live-wave-head">
+                <span>Live audio activity</span>
+                <span>{waveformSamples.length} samples</span>
+              </div>
+              <div className="live-wave-bars" aria-label="Live waveform preview">
+                {waveformSamples.map((sample, idx) => (
+                  <span
+                    key={`wave-${idx}`}
+                    className="live-wave-bar"
+                    style={{ height: `${10 + sample * 46}px` }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -1043,15 +941,51 @@ function App() {
           </div>
           {videoSummary && (
             <div className="summary-panel">
-              <h3>Video Summary</h3>
+              <h3>Video Brief</h3>
+              {summaryMeta?.subject_brief && (
+                <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>{summaryMeta.subject_brief}</p>
+              )}
               <p>{videoSummary}</p>
               {summaryMeta && (
                 <div className="summary-meta">
+                  {summaryMeta.topic_keywords?.length ? <span>Topics: {summaryMeta.topic_keywords.join(', ')}</span> : null}
                   <span>{summaryMeta.video_duration_seconds}s analyzed</span>
                   <span>{summaryMeta.detected_segments} detected segments</span>
                   <span>{summaryMeta.merged_clusters} highlight clusters</span>
+                  {summaryMeta.summary_mode ? <span>Mode: {summaryMeta.summary_mode}</span> : null}
                 </div>
               )}
+              {Array.isArray(summaryMeta?.best_moments) && summaryMeta.best_moments.length ? (
+                <div className="summary-meta" style={{ marginTop: '0.9rem', flexDirection: 'column', alignItems: 'flex-start', gap: '0.4rem' }}>
+                  {summaryMeta.best_moments.map((moment) => (
+                    <span key={`${moment.start}-${moment.end}`}>{moment.display_time} - {moment.label}</span>
+                  ))}
+                </div>
+              ) : null}
+              {Array.isArray(summaryMeta?.score_breakdown) && summaryMeta.score_breakdown.length ? (
+                <div className="score-breakdown-wrap">
+                  <h4>Highlight score breakdown</h4>
+                  <div className="score-breakdown-grid">
+                    {summaryMeta.score_breakdown.map((segment, idx) => {
+                      const timeLabel = segment.display_time
+                        || `${formatSecondsLabel(segment.start)}-${formatSecondsLabel(segment.end)}`;
+                      return (
+                        <div className="score-card" key={`${segment.start}-${segment.end}-${idx}`}>
+                          <div className="score-card-head">
+                            <strong>{timeLabel}</strong>
+                            <span>Final: {formatScorePct(segment.final_score)}</span>
+                          </div>
+                          <div className="score-metrics">
+                            <span>Audio {formatScorePct(segment.audio_score)}</span>
+                            <span>Vision {formatScorePct(segment.vision_score)}</span>
+                            <span>Transcript {formatScorePct(segment.transcript_score)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
           <div className={`video-player ${exportFormat === '9:16' ? 'is-shorts' : ''}`}>
@@ -1066,13 +1000,17 @@ function App() {
               <Download size={20} />
               Download Highlights
             </button>
+            <button className="btn secondary" onClick={exportVideoReport} disabled={!summaryMeta}>
+              <Download size={20} />
+              Download Brief Report
+            </button>
             <button 
               className="btn secondary" 
               onClick={() => {
                 const canPublishToYoutube = user?.effective_plan === 'trial' || user?.effective_plan === 'pro';
                 if (!canPublishToYoutube) {
                   setAuthError('YouTube publishing is available on Pro plan only (or during full trial).');
-                  setActiveTab('pricing');
+                  setActiveTab('account');
                   return;
                 }
                 if (!user.youtube_connected) {
@@ -1172,130 +1110,6 @@ function App() {
     );
   };
 
-  const renderPricing = () => (
-    <div className="pricing-grid">
-      <div className="billing-banner info">
-        <strong>60-day full trial:</strong> Every new user gets all premium features first, then can choose Free, Plus, or Pro.
-        {user?.trial_active && user?.trial_ends_at
-          ? ` ${Math.max(0, Math.ceil((new Date(user.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))} days left in trial.`
-          : ''}
-      </div>
-
-      {pricing.gateway !== 'stripe' && (
-        <div className="billing-banner warning">
-          Real card checkout is currently disabled. Configure Stripe to enable payments; instant top-up is available for development.
-        </div>
-      )}
-
-      {user && (
-        <div className="pricing-balance-card">
-          <h3>Current Balance</h3>
-          <p className="price-tag">{(user.tokens || 0).toLocaleString()} tokens</p>
-          <p className="price-meta">
-            Billing mode: {pricing.gateway === 'stripe' ? 'Stripe Checkout' : 'Instant test top-up'}
-          </p>
-          <p className="price-meta">
-            {user.trial_active
-              ? `Trial active until ${new Date(user.trial_ends_at).toLocaleDateString()}`
-              : `Current plan: ${(user.plan || 'free').toUpperCase()}`}
-          </p>
-        </div>
-      )}
-
-      {['free', 'plus', 'pro'].map((planKey) => {
-        const planData = pricing?.plans?.plans?.[planKey] || DEFAULT_PLAN_CATALOG.plans[planKey];
-        const planCopy = PLAN_COPY[planKey];
-        const isCurrent = (user?.plan || 'free') === planKey && !user?.trial_active;
-        const isTrialIncluded = user?.trial_active && planKey !== 'free';
-
-        return (
-          <div className={`pricing-card plan-card ${planKey}`} key={`plan-${planKey}`}>
-            <div className="plan-head">
-              <div>
-                <h3>{planCopy.title}</h3>
-                <p className="plan-subtitle">{planCopy.subtitle}</p>
-              </div>
-              {isCurrent ? <span className="plan-badge current">Current</span> : null}
-              {isTrialIncluded ? <span className="plan-badge trial">Included in Trial</span> : null}
-            </div>
-
-            <p className="price-tag">
-              {planData.price_usd > 0 ? `$${planData.price_usd.toFixed(2)}/mo` : '$0/mo'}
-            </p>
-            <p className="price-meta">
-              {planData.monthly_tokens > 0
-                ? `${planData.monthly_tokens.toLocaleString()} tokens monthly`
-                : `${planData.daily_tokens.toLocaleString()} tokens daily`}
-            </p>
-            <p className="price-meta">
-              {planData.monthly_tokens > 0
-                ? `${Math.floor(planData.monthly_tokens / (pricing.process_token_cost || 25))} edits/month at ${pricing.process_token_cost || 25} tokens per edit`
-                : `${Math.floor(planData.daily_tokens / (pricing.process_token_cost || 25))} edits/day at ${pricing.process_token_cost || 25} tokens per edit`}
-            </p>
-
-            <ul className="plan-reasons">
-              {planCopy.reasons.map((reason) => (
-                <li key={reason}>
-                  <Check size={16} /> {reason}
-                </li>
-              ))}
-            </ul>
-
-            {planKey === 'plus' ? <span className="plan-badge popular">Recommended</span> : null}
-
-            {planKey === 'free' ? (
-              <button className="btn secondary" disabled={checkoutBusy || isCurrent} onClick={() => changePlan('free')}>
-                {isCurrent ? 'Current Plan' : 'Switch to Free'}
-              </button>
-            ) : (
-              <button
-                className="btn"
-                disabled={checkoutBusy || isCurrent || isTrialIncluded}
-                onClick={() => changePlan(planKey)}
-              >
-                <Wallet size={18} /> {isCurrent ? 'Current Plan' : 'Upgrade'}
-              </button>
-            )}
-          </div>
-        );
-      })}
-
-      <div className="billing-banner">
-        One-time token purchases are available in the <strong>Tokens</strong> tab.
-      </div>
-    </div>
-  );
-
-  const renderTokens = () => (
-    <div className="pricing-grid">
-      <div className="billing-banner info">
-        <strong>Token Wallet:</strong> this tab only buys token credits for processing volume. It does <strong>not</strong> unlock plan features.
-      </div>
-
-      {(pricing.token_packs || []).map((pack) => (
-        <div className="pricing-card topup-card" key={pack.tokens}>
-          <h3>{pack.tokens} Tokens</h3>
-          <p className="price-tag">${pack.amount_usd.toFixed(2)}</p>
-          <p className="price-meta">Approx ${(pack.amount_usd / pack.tokens).toFixed(3)} per token</p>
-          <p className="price-meta">About {Math.floor(pack.tokens / (pricing.process_token_cost || 25))} edits at {pricing.process_token_cost || 25} tokens per edit</p>
-          {pricing.gateway === 'stripe' ? (
-            <button className="btn" disabled={checkoutBusy} onClick={() => startCheckout(pack)}>
-              <Wallet size={18} /> Buy Tokens
-            </button>
-          ) : (
-            <button className="btn secondary" disabled={checkoutBusy} onClick={() => instantDevTopUp(pack)}>
-              <Zap size={18} /> Add Instantly (Dev Mode)
-            </button>
-          )}
-        </div>
-      ))}
-
-      <div className="billing-banner">
-        Need premium capabilities like faster queue and YouTube publish? Use the <strong>Pricing</strong> tab to upgrade.
-      </div>
-    </div>
-  );
-
   const renderHome = () => (
     <div className="home-page">
       <div className="hero-split">
@@ -1318,7 +1132,7 @@ function App() {
               Long-form ready
             </Motion.div>
             <Motion.div className="stat-chip" animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 2.4, ease: 'easeInOut', delay: 0.7 }}>
-              Token paywall + auth
+              Secure auth + export
             </Motion.div>
           </div>
           <Motion.button
@@ -1372,7 +1186,7 @@ function App() {
 
         <Motion.div className="home-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.18 }}>
           <h3>Fast Workflow</h3>
-          <p>Login, process, preview, and export in one streamlined path with token billing built in.</p>
+          <p>Login, process, preview, and export in one streamlined path.</p>
         </Motion.div>
       </div>
 
@@ -1387,7 +1201,7 @@ function App() {
         <Motion.section className="home-section" initial={{ opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, amount: 0.35 }} transition={{ duration: 0.55, delay: 0.08 }}>
           <h3>Production-Minded UX</h3>
           <p>
-            Secure auth, usage tokens, pricing controls, and explicit result disclosure make it deployment-ready instead of just notebook-ready.
+            Secure auth, export controls, and explicit result disclosure make it deployment-ready instead of just notebook-ready.
           </p>
         </Motion.section>
       </div>
@@ -1401,7 +1215,6 @@ function App() {
         <div className="user-chip large">
           <span>@{user.username}</span>
           <span>{user.email}</span>
-          <span><Coins size={16} /> {user.tokens} tokens</span>
         </div>
         <div className="topup-buttons">
           {!user.youtube_connected ? (
@@ -1418,7 +1231,6 @@ function App() {
               </button>
             </>
           )}
-          <button className="btn mini" onClick={() => setActiveTab('tokens')}><Wallet size={16} /> Buy Tokens</button>
           <button className="btn mini ghost" onClick={handleTestEmail} disabled={authLoading}>
             <Mail size={16} /> {authLoading ? 'Sending...' : 'Test Email'}
           </button>
@@ -1431,16 +1243,12 @@ function App() {
   const renderActiveTab = () => {
     if (activeTab === 'home') return renderHome();
     if (activeTab === 'editor') return renderEditor();
-    if (activeTab === 'pricing') return renderPricing();
-    if (activeTab === 'tokens') return renderTokens();
     return renderAccount();
   };
 
   const tabs = [
     { id: 'home', label: 'Home', icon: Home },
     { id: 'editor', label: 'Editor', icon: Film },
-    { id: 'pricing', label: 'Pricing', icon: Wallet },
-    { id: 'tokens', label: 'Tokens', icon: Coins },
     { id: 'account', label: 'Account', icon: User },
   ];
 

@@ -59,6 +59,148 @@ def _format_duration(seconds: float) -> str:
     return f"{remaining_seconds}s"
 
 
+_SUMMARY_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "about", "video", "videoes",
+    "clip", "clips", "moment", "moments", "highlight", "highlights", "audio", "scene", "scenes",
+    "segment", "segments", "recording", "recorded", "because", "after", "before", "during", "there",
+    "their", "they", "them", "have", "has", "had", "you", "your", "were", "was", "are", "is",
+    "a", "an", "to", "of", "in", "on", "at", "it", "be", "by", "as", "or", "we", "our", "i",
+}
+
+_MOMENT_LABELS = [
+    "Opening",
+    "Build-up",
+    "Turning point",
+    "Peak moment",
+    "Closing beat",
+]
+
+
+def _tokenize_transcript_text(text: str):
+    tokens = []
+    for token in text.lower().replace("/", " ").replace("-", " ").split():
+        cleaned = token.strip(".,!?;:\"'()[]{}<>#")
+        if len(cleaned) < 4 or cleaned in _SUMMARY_STOPWORDS or cleaned.isdigit():
+            continue
+        tokens.append(cleaned)
+    return tokens
+
+
+def _extract_transcript_topic_phrase(transcript_text: str):
+    words = transcript_text.replace("/", " ").replace("-", " ").split()
+    phrases = []
+    current = []
+
+    for raw_word in words:
+        word = raw_word.strip(".,!?;:\"'()[]{}<>#").lower()
+        if len(word) < 4 or word in _SUMMARY_STOPWORDS or word.isdigit():
+            if len(current) >= 2:
+                phrases.append(" ".join(current))
+            current = []
+            continue
+        current.append(word)
+        if len(current) == 3:
+            phrases.append(" ".join(current))
+            current = current[1:]
+
+    if len(current) >= 2:
+        phrases.append(" ".join(current))
+
+    if not phrases:
+        return None
+
+    frequency = {}
+    for phrase in phrases:
+        frequency[phrase] = frequency.get(phrase, 0) + 1
+
+    ranked = sorted(frequency.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
+    return ranked[0][0] if ranked else None
+
+
+def _extract_topic_from_transcript(transcript_segments, cheer_segments):
+    transcript_text = " ".join(
+        (segment.get("text", "") or "").strip()
+        for segment in transcript_segments
+        if segment.get("text")
+    ).lower()
+
+    if not transcript_text:
+        return None, []
+
+    topic_phrase = _extract_transcript_topic_phrase(transcript_text)
+    cleaned = _tokenize_transcript_text(transcript_text)
+
+    if not cleaned:
+        return None, []
+
+    frequencies = {}
+    for token in cleaned:
+        frequencies[token] = frequencies.get(token, 0) + 1
+
+    ranked_keywords = sorted(frequencies.items(), key=lambda item: (-item[1], item[0]))
+    keywords = [word for word, _count in ranked_keywords[:5]]
+
+    if not keywords:
+        return None, []
+
+    top_topic = topic_phrase or " ".join(keywords[:2]).strip() or keywords[0]
+
+    topic_segments = len(merge_segments(list(cheer_segments)))
+    topic_prefix = "This video appears to be about"
+    if topic_segments == 0:
+        topic_prefix = "This recording seems to focus on"
+
+    return f"{topic_prefix} {top_topic}.", keywords[:5]
+
+
+def _build_moment_labels(merged_segments, transcript_segments, video_duration):
+    if not merged_segments:
+        return []
+
+    transcript_segments = transcript_segments or []
+    moments = []
+
+    for index, (start, end) in enumerate(merged_segments[:5]):
+        window_text = " ".join(
+            (segment.get("text", "") or "").strip()
+            for segment in transcript_segments
+            if segment.get("text") and segment.get("start", 0) < end and segment.get("end", 0) > start
+        ).lower()
+
+        window_keywords = _tokenize_transcript_text(window_text)
+        if window_keywords:
+            keyword_label = " ".join(window_keywords[:2])
+        else:
+            keyword_label = None
+
+        midpoint = (start + end) / 2
+        ratio = midpoint / max(video_duration, 1)
+        if ratio < 0.2:
+            position_label = "opening"
+        elif ratio < 0.45:
+            position_label = "early"
+        elif ratio < 0.7:
+            position_label = "middle"
+        elif ratio < 0.9:
+            position_label = "late"
+        else:
+            position_label = "final"
+
+        base_label = _MOMENT_LABELS[min(index, len(_MOMENT_LABELS) - 1)]
+        label = f"{base_label} {position_label}"
+        if keyword_label:
+            label = f"{label}: {keyword_label}"
+
+        moments.append({
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "label": label,
+            "display_time": f"{_format_duration(start)}-{_format_duration(end)}",
+        })
+
+    return moments
+
+
 def build_video_summary(video_duration: float, cheer_segments, cheer_threshold: float, segment_duration: float) -> str:
     total_windows = int(np.ceil(video_duration / segment_duration)) if video_duration > 0 else 0
     merged_segments = merge_segments(list(cheer_segments))
@@ -101,6 +243,21 @@ def build_video_summary(video_duration: float, cheer_segments, cheer_threshold: 
         f"Detected highlight windows include {', '.join(window_labels)}. "
         f"Overall, the recording looks like a long-form event or match with repeated audience reactions and several clear spike moments."
     )
+
+
+def build_subject_brief(summary_duration: float, transcript_segments, cheer_segments):
+    topic_sentence, keywords = _extract_topic_from_transcript(transcript_segments, cheer_segments)
+    if not topic_sentence:
+        return None, keywords
+
+    merged_segments = merge_segments(list(cheer_segments))
+    detected_clusters = len(merged_segments)
+    if detected_clusters:
+        lead = f"{topic_sentence} It has {detected_clusters} notable highlight cluster{'s' if detected_clusters != 1 else ''}."
+    else:
+        lead = f"{topic_sentence}"
+
+    return lead, keywords
 
 def _resolve_ffmpeg_binary():
     env_binary = os.getenv("FFMPEG_BINARY")
@@ -213,7 +370,16 @@ def cut_and_merge_clips(video_path, cheer_segments, output_dir, export_format="1
         return None, video_duration
 
 # Process video file (TURBO VERSION)
-def process_video(video_path, output_dir, segment_duration=2.0, cheer_threshold=0.6, use_ai=True, export_format="16:9", video_filter="none"):
+def process_video(
+    video_path,
+    output_dir,
+    segment_duration=2.0,
+    cheer_threshold=0.6,
+    use_ai=True,
+    export_format="16:9",
+    video_filter="none",
+    progress_callback=None,
+):
     audio_path = os.path.join(output_dir, "extracted_audio.wav")
 
     cv2_mod = None
@@ -248,16 +414,22 @@ def process_video(video_path, output_dir, segment_duration=2.0, cheer_threshold=
     # Turbo Pass 1: Full Transcription (Much faster than segment-by-segment)
     if use_ai and trans:
         trans.load_full_transcription(audio_path)
+        transcript_segments = getattr(trans, "cached_segments", []) or []
+    else:
+        transcript_segments = []
 
     y, sr = librosa.load(audio_path, sr=16000)
     total_duration = librosa.get_duration(y=y, sr=sr)
     cheer_segments = []
+    score_windows = []
+    waveform_points = []
+    total_windows = max(1, int(np.ceil(total_duration / segment_duration)))
 
     # Turbo optimization: Persistent Video Capture handle
     cap = cv2_mod.VideoCapture(video_path) if use_ai and cv2_mod is not None else None
 
     # Process each segment
-    for start_time in np.arange(0, total_duration, segment_duration):
+    for idx, start_time in enumerate(np.arange(0, total_duration, segment_duration)):
         end_time = min(start_time + segment_duration, total_duration)
         start_sample = int(start_time * sr)
         end_sample = int(end_time * sr)
@@ -270,6 +442,10 @@ def process_video(video_path, output_dir, segment_duration=2.0, cheer_threshold=
             final_score = audio_prob
             vision_score = 0
             text_score = 0
+
+            rms = float(np.sqrt(np.mean(np.square(segment)))) if len(segment) else 0.0
+            waveform_amp = max(0.0, min(1.0, rms * 8.0))
+            waveform_points.append(round(waveform_amp, 4))
             
             # Smart AI boost if audio signal is promising (>0.35)
             if use_ai and audio_prob > 0.35:
@@ -290,6 +466,30 @@ def process_video(video_path, output_dir, segment_duration=2.0, cheer_threshold=
             if final_score >= cheer_threshold:
                 cheer_segments.append((start_time, end_time))
 
+            score_windows.append(
+                {
+                    "start": float(start_time),
+                    "end": float(end_time),
+                    "audio_score": float(audio_prob),
+                    "vision_score": float(vision_score),
+                    "transcript_score": float(text_score),
+                    "final_score": float(final_score),
+                }
+            )
+
+            if progress_callback and (idx % 2 == 0 or idx == total_windows - 1):
+                try:
+                    progress_callback(
+                        {
+                            "stage": "analyzing signals",
+                            "message": "Analyzing audio, vision, and transcript cues...",
+                            "analysis_progress_pct": round(((idx + 1) / total_windows) * 100, 1),
+                            "live_audio_waveform": waveform_points[-72:],
+                        }
+                    )
+                except Exception:
+                    pass
+
     if cap: cap.release()
     if os.path.exists(audio_path): os.remove(audio_path)
 
@@ -303,19 +503,67 @@ def process_video(video_path, output_dir, segment_duration=2.0, cheer_threshold=
         video_filter=video_filter,
         smoothing_buffer_cls=smoothing_buffer_cls,
     )
+
+    if progress_callback:
+        try:
+            progress_callback(
+                {
+                    "stage": "finalizing highlights",
+                    "message": "Finalizing highlight reel...",
+                    "analysis_progress_pct": 100,
+                    "live_audio_waveform": waveform_points[-72:],
+                }
+            )
+        except Exception:
+            pass
     
     summary_text = build_video_summary(video_duration or total_duration, cheer_segments, cheer_threshold, segment_duration)
+    subject_brief, topic_keywords = build_subject_brief(video_duration or total_duration, transcript_segments, cheer_segments)
+    if subject_brief:
+        summary_text = f"{subject_brief} {summary_text}"
+    merged_highlights = merge_segments(list(cheer_segments))
+    best_moments = _build_moment_labels(merged_highlights, transcript_segments, video_duration or total_duration)
+
+    score_breakdown = []
+    for start, end in merged_highlights:
+        overlapping = [
+            window
+            for window in score_windows
+            if window["start"] < end and window["end"] > start
+        ]
+        if not overlapping:
+            continue
+
+        score_breakdown.append(
+            {
+                "start": round(float(start), 2),
+                "end": round(float(end), 2),
+                "display_time": f"{_format_duration(start)}-{_format_duration(end)}",
+                "audio_score": round(float(np.mean([w["audio_score"] for w in overlapping])), 4),
+                "vision_score": round(float(np.mean([w["vision_score"] for w in overlapping])), 4),
+                "transcript_score": round(float(np.mean([w["transcript_score"] for w in overlapping])), 4),
+                "final_score": round(float(np.mean([w["final_score"] for w in overlapping])), 4),
+            }
+        )
+
     summary_data = {
         "video_duration_seconds": round(video_duration or total_duration, 2),
         "detected_segments": len(cheer_segments),
-        "merged_clusters": len(merge_segments(list(cheer_segments))),
+        "merged_clusters": len(merged_highlights),
         "segment_duration_seconds": segment_duration,
         "cheer_threshold": cheer_threshold,
+        "subject_brief": subject_brief,
+        "topic_keywords": topic_keywords,
+        "best_moments": best_moments,
+        "score_breakdown": score_breakdown,
+        "summary_mode": "transcript+audio" if transcript_segments else "audio-only",
     }
     return {
         "output_video_path": output_video_path,
         "summary_text": summary_text,
         "summary_data": summary_data,
+        "live_audio_waveform": waveform_points[-72:],
+        "analysis_progress_pct": 100,
     }
 
 if __name__ == "__main__":

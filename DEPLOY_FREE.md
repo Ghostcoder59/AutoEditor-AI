@@ -58,12 +58,7 @@ No manual SQL is required. The backend auto-creates required tables on startup.
 - `DATABASE_URL` = your Supabase Postgres URI
 - `FRONTEND_BASE_URL` = temporary placeholder, e.g. `https://example.vercel.app` (update after frontend deploy)
 - `YOUTUBE_BACKEND_REDIRECT_URI` = `https://<render-service>.onrender.com/auth/youtube/callback`
-- `PROCESS_TOKEN_COST` = `25`
 - `TRIAL_DAYS` = `60`
-- `TRIAL_DAILY_TOKENS` = `400`
-- `FREE_DAILY_TOKENS` = `100`
-- `PLUS_MONTHLY_TOKENS` = `2000`
-- `PRO_MONTHLY_TOKENS` = `8000`
 
 Optional env vars:
 - `STRIPE_SECRET_KEY`
@@ -105,10 +100,9 @@ In your backend `client_secrets.json`, ensure the same client is used.
 
 1. Open frontend URL.
 2. Register user and login.
-3. Open Pricing and Tokens tabs.
-4. Process a video and verify token deduction.
-5. Confirm trial countdown and plan behavior.
-6. YouTube publish should work for trial/pro users only.
+3. Open the app and process a video.
+4. Confirm trial countdown and plan behavior.
+5. YouTube publish should work for trial/pro users only.
 
 ## 9) Notes about free tiers
 

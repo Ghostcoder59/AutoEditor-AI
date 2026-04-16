@@ -26,15 +26,11 @@ from auth_db import (
     authenticate_user,
     create_session,
     get_user_by_token,
-    deduct_tokens,
-    add_tokens,
-    refund_tokens,
     get_user_by_login,
     create_password_reset_token,
     consume_password_reset_token,
     save_youtube_token,
     get_youtube_token,
-    ensure_token_allowance,
     get_plan_catalog,
     set_subscription_plan,
     upsert_video_job,
@@ -89,16 +85,17 @@ logger = logging.getLogger("autoeditor.api")
 
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-PROCESS_TOKEN_COST = int(os.getenv("PROCESS_TOKEN_COST", "25"))
 STARTING_TOKENS = int(os.getenv("STARTING_TOKENS", "120"))
 RESET_TOKEN_DEBUG = os.getenv("RESET_TOKEN_DEBUG", "false").lower() == "true"
-DAILY_FREE_TOKENS = int(os.getenv("FREE_DAILY_TOKENS", "100"))
 
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
-if STRIPE_SECRET_KEY and STRIPE_SECRET_KEY.lower() not in ["none", "fixme", "sk_test_..."]:
+STRIPE_SECRET_KEY_RAW = os.getenv("STRIPE_SECRET_KEY", "").strip()
+if STRIPE_SECRET_KEY_RAW.startswith("sk_live_"):
+    STRIPE_SECRET_KEY = STRIPE_SECRET_KEY_RAW
     stripe.api_key = STRIPE_SECRET_KEY
 else:
     STRIPE_SECRET_KEY = None
+    if STRIPE_SECRET_KEY_RAW.startswith("sk_test_"):
+        logger.warning("Stripe test key detected. Set a live sk_live_ key to enable real card payments.")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -127,18 +124,6 @@ class ResetPasswordRequest(BaseModel):
     password: str = Field(min_length=8, max_length=100)
 
 
-class TopupRequest(BaseModel):
-    tokens: int = Field(gt=0, le=10000)
-
-
-class CheckoutSessionRequest(BaseModel):
-    tokens: int = Field(gt=0, le=10000)
-
-
-class CheckoutConfirmRequest(BaseModel):
-    session_id: str
-
-
 class PlanChangeRequest(BaseModel):
     plan: str
 
@@ -153,20 +138,6 @@ class ExportYoutubeRequest(BaseModel):
     title: str
     description: str
     export_format: str = "16:9"
-
-
-TOKEN_PACKS = [
-    {"tokens": 2000, "amount_usd": 5.0},
-    {"tokens": 5000, "amount_usd": 10.0},
-    {"tokens": 15000, "amount_usd": 25.0},
-]
-
-
-def _token_pack_for(tokens: int) -> dict | None:
-    for pack in TOKEN_PACKS:
-        if pack["tokens"] == tokens:
-            return pack
-    return None
 
 
 def _send_password_reset_email(to_email: str, username: str, token: str) -> bool:
@@ -218,7 +189,7 @@ def _require_user(authorization: str | None) -> dict:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user
 
-def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, user_id: int, token_cost: int, use_ai: bool = True, export_format: str = "16:9", video_filter: str = "none"):
+def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, user_id: int, use_ai: bool = True, export_format: str = "16:9", video_filter: str = "none"):
     started_at = time.perf_counter()
     owner_user_id = jobs.get(job_id, {}).get("owner_user_id")
     session_token = jobs.get(job_id, {}).get("session_token")
@@ -260,7 +231,6 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
         summary_data = process_result.get("summary_data") if process_result else None
         
         if not output_video_path or not os.path.exists(output_video_path):
-            updated_tokens = refund_tokens(user_id, token_cost)
             jobs[job_id].update({
                 "status": "error",
                 "stage": "completed",
@@ -269,12 +239,9 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
                 "summary_data": summary_data,
                 "download_url": None,
                 "processing_seconds": round(time.perf_counter() - started_at, 2),
-                "tokens_refunded": token_cost,
-                "tokens_balance": updated_tokens,
             })
             _persist_job_state(job_id, jobs[job_id])
         else:
-            current_user = get_user_by_token(session_token) if session_token else None
             jobs[job_id].update({
                 "status": "success",
                 "stage": "completed",
@@ -283,14 +250,11 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
                 "summary_data": summary_data,
                 "download_url": f"/download/{job_id}/highlight_reel.mp4",
                 "processing_seconds": round(time.perf_counter() - started_at, 2),
-                "tokens_charged": token_cost,
-                "tokens_balance": current_user["tokens"] if current_user else None,
             })
             _persist_job_state(job_id, jobs[job_id])
             
     except Exception as e:
         logger.exception("Job %s failed", job_id)
-        updated_tokens = refund_tokens(user_id, token_cost)
         jobs[job_id].update({
             "status": "error",
             "stage": "failed",
@@ -301,8 +265,6 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
             "summary_data": None,
             "download_url": None,
             "processing_seconds": round(time.perf_counter() - started_at, 2),
-            "tokens_refunded": token_cost,
-            "tokens_balance": updated_tokens,
         })
         _persist_job_state(job_id, jobs[job_id])
     finally:
@@ -312,7 +274,7 @@ def bg_process_url(job_id: str, url: str, output_folder: str, output_dir: str, u
             except Exception:
                 pass
 
-def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int, token_cost: int, use_ai: bool = True, export_format: str = "16:9"):
+def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int, use_ai: bool = True, export_format: str = "16:9"):
     started_at = time.perf_counter()
     owner_user_id = jobs.get(job_id, {}).get("owner_user_id")
     session_token = jobs.get(job_id, {}).get("session_token")
@@ -323,7 +285,6 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
         summary_data = process_result.get("summary_data") if process_result else None
         
         if not output_video_path or not os.path.exists(output_video_path):
-            updated_tokens = refund_tokens(user_id, token_cost)
             jobs[job_id] = {
                 "status": "error",
                 "stage": "completed",
@@ -332,14 +293,11 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
                 "summary_data": summary_data,
                 "download_url": None,
                 "processing_seconds": round(time.perf_counter() - started_at, 2),
-                "tokens_refunded": token_cost,
-                "tokens_balance": updated_tokens,
                 "owner_user_id": owner_user_id,
                 "session_token": session_token,
             }
             _persist_job_state(job_id, jobs[job_id])
         else:
-            current_user = get_user_by_token(session_token) if session_token else None
             jobs[job_id] = {
                 "status": "success",
                 "stage": "completed",
@@ -348,8 +306,6 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
                 "summary_data": summary_data,
                 "download_url": f"/download/{job_id}/highlight_reel.mp4",
                 "processing_seconds": round(time.perf_counter() - started_at, 2),
-                "tokens_charged": token_cost,
-                "tokens_balance": current_user["tokens"] if current_user else None,
                 "owner_user_id": owner_user_id,
                 "session_token": session_token,
             }
@@ -357,7 +313,6 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
             
     except Exception as e:
         logger.exception("Job %s failed", job_id)
-        updated_tokens = refund_tokens(user_id, token_cost)
         jobs[job_id] = {
             "status": "error",
             "stage": "failed",
@@ -368,8 +323,6 @@ def bg_process_video(job_id: str, video_path: str, output_dir: str, user_id: int
             "summary_data": None,
             "download_url": None,
             "processing_seconds": round(time.perf_counter() - started_at, 2),
-            "tokens_refunded": token_cost,
-            "tokens_balance": updated_tokens,
             "owner_user_id": owner_user_id,
             "session_token": session_token,
         }
@@ -405,7 +358,6 @@ def read_root():
     return {
         "message": "Welcome to the Automated Video Editor API!",
         "max_upload_mb": MAX_UPLOAD_MB,
-        "process_token_cost": PROCESS_TOKEN_COST,
     }
 
 
@@ -443,7 +395,6 @@ async def register(payload: RegisterRequest):
     except Exception:
         raise HTTPException(status_code=409, detail="Email or username already registered")
 
-    ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
     token = create_session(user["id"])
     enriched_user = get_user_by_token(token)
     return {
@@ -458,7 +409,6 @@ async def login(payload: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
     token = create_session(user["id"])
     enriched_user = get_user_by_token(token)
     return {
@@ -499,11 +449,6 @@ async def reset_password(payload: ResetPasswordRequest):
 @app.get("/auth/me")
 async def me(authorization: str | None = Header(default=None)):
     user = _require_user(authorization)
-    # Refresh trial/free/paid allowances automatically on profile fetch.
-    try:
-        ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
-    except Exception as e:
-        logger.error(f"Daily token refresh failed: {e}")
         
     # Fetch updated user info
     user = get_user_by_token(_extract_bearer_token(authorization))
@@ -596,8 +541,6 @@ async def youtube_callback(code: str, state: str):
 async def pricing():
     catalog = get_plan_catalog()
     return {
-        "process_token_cost": PROCESS_TOKEN_COST,
-        "token_packs": TOKEN_PACKS,
         "plans": catalog,
         "gateway": "stripe" if STRIPE_SECRET_KEY else "manual",
     }
@@ -610,7 +553,6 @@ async def billing_plans(authorization: str | None = Header(default=None)):
     if authorization:
         try:
             user = _require_user(authorization)
-            ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
             current_user = get_user_by_token(_extract_bearer_token(authorization))
         except HTTPException:
             current_user = None
@@ -642,99 +584,6 @@ async def change_plan(payload: PlanChangeRequest, authorization: str | None = He
     }
 
 
-@app.post("/billing/topup")
-async def topup(payload: TopupRequest, authorization: str | None = Header(default=None)):
-    user = _require_user(authorization)
-    amount = round(payload.tokens * 0.05, 2)
-    balance = add_tokens(user["id"], payload.tokens, amount_usd=amount, status="paid")
-    return {
-        "message": "Top-up successful",
-        "tokens_added": payload.tokens,
-        "amount_usd": amount,
-        "tokens_balance": balance,
-    }
-
-
-@app.post("/billing/checkout-session")
-async def create_checkout_session(payload: CheckoutSessionRequest, authorization: str | None = Header(default=None)):
-    user = _require_user(authorization)
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="Stripe is not configured yet")
-
-    pack = _token_pack_for(payload.tokens)
-    if not pack:
-        raise HTTPException(status_code=400, detail="Invalid token pack")
-
-    try:
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            payment_method_types=["card"],
-            customer_email=user["email"],
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "usd",
-                        "product_data": {
-                            "name": f"AutoEditor Pro {pack['tokens']} token pack",
-                        },
-                        "unit_amount": int(pack["amount_usd"] * 100),
-                    },
-                    "quantity": 1,
-                }
-            ],
-            success_url=f"{FRONTEND_BASE_URL}/?tab=pricing&checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{FRONTEND_BASE_URL}/?tab=pricing&checkout=cancel",
-            metadata={
-                "user_id": str(user["id"]),
-                "tokens": str(pack["tokens"]),
-                "amount_usd": str(pack["amount_usd"]),
-            },
-        )
-    except Exception:
-        logger.exception("Stripe session creation failed for user %s", user["id"])
-        raise HTTPException(status_code=502, detail="Unable to create checkout session")
-
-    return {"checkout_url": session.url}
-
-
-@app.post("/billing/checkout-confirm")
-async def confirm_checkout(payload: CheckoutConfirmRequest, authorization: str | None = Header(default=None)):
-    user = _require_user(authorization)
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="Stripe is not configured yet")
-
-    try:
-        session = stripe.checkout.Session.retrieve(payload.session_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid checkout session")
-
-    if session.get("payment_status") != "paid":
-        raise HTTPException(status_code=400, detail="Payment not completed")
-
-    metadata = session.get("metadata") or {}
-    session_user_id = int(metadata.get("user_id", "0"))
-    tokens = int(metadata.get("tokens", "0"))
-    amount_usd = float(metadata.get("amount_usd", "0"))
-
-    if session_user_id != user["id"]:
-        raise HTTPException(status_code=403, detail="Checkout does not belong to this user")
-    if tokens <= 0:
-        raise HTTPException(status_code=400, detail="Invalid token amount in checkout session")
-
-    balance = add_tokens(
-        user["id"],
-        tokens,
-        amount_usd=amount_usd,
-        status="paid",
-        gateway_session_id=payload.session_id,
-    )
-    return {
-        "message": "Top-up successful",
-        "tokens_added": tokens,
-        "amount_usd": amount_usd,
-        "tokens_balance": balance,
-    }
-
 @app.post("/process")
 async def process_video_endpoint(
     file: UploadFile = File(...),
@@ -744,21 +593,11 @@ async def process_video_endpoint(
     authorization: str | None = Header(default=None),
 ):
     user = _require_user(authorization)
-    ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
     user = get_user_by_token(_extract_bearer_token(authorization))
 
     if not file.content_type or not file.content_type.startswith("video/"):
          raise HTTPException(status_code=400, detail="Invalid file type. Please upload a video.")
 
-    if user["tokens"] < PROCESS_TOKEN_COST:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Not enough tokens. You need at least {PROCESS_TOKEN_COST} tokens to process a video.",
-        )
-
-    if not deduct_tokens(user["id"], PROCESS_TOKEN_COST):
-        raise HTTPException(status_code=402, detail="Not enough tokens. Please top up and try again.")
-    
     # Create unique filename
     unique_id = str(uuid.uuid4())
     file_extension = os.path.splitext(file.filename)[1]
@@ -785,13 +624,13 @@ async def process_video_endpoint(
         "status": "processing",
         "stage": "queued",
         "message": "Analyzing audio & video...",
+        "live_audio_waveform": [],
+        "analysis_progress_pct": 0,
         "download_url": None,
         "owner_user_id": user["id"],
         "session_token": _extract_bearer_token(authorization),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file_size_mb": round(written_bytes / (1024 * 1024), 2),
-        "tokens_charged": PROCESS_TOKEN_COST,
-        "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
     _persist_job_state(unique_id, jobs[unique_id])
     logger.info(
@@ -803,15 +642,13 @@ async def process_video_endpoint(
     )
     if background_tasks is None:
         raise HTTPException(status_code=500, detail="Background task manager is unavailable")
-    background_tasks.add_task(bg_process_video, unique_id, video_path, output_dir, user["id"], PROCESS_TOKEN_COST, use_ai=use_ai, export_format=export_format)
+    background_tasks.add_task(bg_process_video, unique_id, video_path, output_dir, user["id"], use_ai=use_ai, export_format=export_format)
     return {
         "job_id": unique_id,
         "status": "processing",
         "stage": "queued",
         "message": "Processing started.",
         "max_upload_mb": MAX_UPLOAD_MB,
-        "tokens_charged": PROCESS_TOKEN_COST,
-        "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
 
 @app.post("/process-url")
@@ -821,14 +658,7 @@ async def process_url_endpoint(
     authorization: str | None = Header(default=None),
 ):
     user = _require_user(authorization)
-    ensure_token_allowance(user["id"], DAILY_FREE_TOKENS)
     user = get_user_by_token(_extract_bearer_token(authorization))
-
-    if user["tokens"] < PROCESS_TOKEN_COST:
-        raise HTTPException(status_code=402, detail=f"Not enough tokens. You need at least {PROCESS_TOKEN_COST} to process a video.")
-
-    if not deduct_tokens(user["id"], PROCESS_TOKEN_COST):
-        raise HTTPException(status_code=402, detail="Not enough tokens. Please top up and try again.")
     
     unique_id = str(uuid.uuid4())
     output_dir = os.path.join(OUTPUT_FOLDER, unique_id)
@@ -838,13 +668,13 @@ async def process_url_endpoint(
         "status": "processing",
         "stage": "queued",
         "message": "Downloading video from URL...",
+        "live_audio_waveform": [],
+        "analysis_progress_pct": 0,
         "download_url": None,
         "owner_user_id": user["id"],
         "session_token": _extract_bearer_token(authorization),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "file_size_mb": None,
-        "tokens_charged": PROCESS_TOKEN_COST,
-        "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
     _persist_job_state(unique_id, jobs[unique_id])
     
@@ -852,16 +682,15 @@ async def process_url_endpoint(
         raise HTTPException(status_code=500, detail="Background task manager is unavailable")
     
     background_tasks.add_task(
-        bg_process_url, 
-        unique_id, 
-        payload.url, 
-        UPLOAD_FOLDER, 
-        output_dir, 
-        user["id"], 
-        PROCESS_TOKEN_COST, 
-        use_ai=payload.use_ai, 
+        bg_process_url,
+        unique_id,
+        payload.url,
+        UPLOAD_FOLDER,
+        output_dir,
+        user["id"],
+        use_ai=payload.use_ai,
         export_format=payload.export_format,
-        video_filter=payload.video_filter
+        video_filter=payload.video_filter,
     )
     
     return {
@@ -869,8 +698,6 @@ async def process_url_endpoint(
         "status": "processing",
         "stage": "queued",
         "message": "Download started.",
-        "tokens_charged": PROCESS_TOKEN_COST,
-        "tokens_balance": max(user["tokens"] - PROCESS_TOKEN_COST, 0),
     }
 
 @app.get("/status/{job_id}")
@@ -880,9 +707,9 @@ async def get_status(job_id: str, authorization: str | None = Header(default=Non
     except HTTPException as e:
         logger.warning(f"[Status] Auth failed for job {job_id}: {e.detail}")
         raise
-    
+
     logger.info(f"[Status] Checking job {job_id} for user {user.get('id')}")
-    
+
     job_state = jobs.get(job_id)
     if not job_state:
         logger.info(f"[Status] Job {job_id} not in memory, checking disk...")
@@ -891,7 +718,7 @@ async def get_status(job_id: str, authorization: str | None = Header(default=Non
             logger.info(f"[Status] Job {job_id} loaded from disk, status={job_state.get('status')}")
     else:
         logger.info(f"[Status] Job {job_id} found in memory, status={job_state.get('status')}")
-    
+
     if not job_state:
         logger.warning(f"[Status] Job {job_id} not found (not in memory or disk)")
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found (not processing)")
@@ -907,7 +734,7 @@ async def get_status(job_id: str, authorization: str | None = Header(default=Non
         })
         _persist_job_state(job_id, interrupted)
         job_state = interrupted
-    
+
     owner_id = job_state.get("owner_user_id")
     if owner_id not in (None, user["id"]):
         logger.warning(f"[Status] Job {job_id} ownership mismatch: owner={owner_id}, user={user['id']}")
