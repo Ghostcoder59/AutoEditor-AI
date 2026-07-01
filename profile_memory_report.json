@@ -1,0 +1,28 @@
+{
+  "command": null,
+  "timeout": 15.0,
+  "interval": 1.0,
+  "peak": {
+    "system_rss_bytes": 15851589632,
+    "proc_rss_bytes": 2760704,
+    "gpu": {
+      "0": 1957
+    }
+  },
+  "samples_count": 1,
+  "samples": [
+    {
+      "t": 0.0,
+      "system_rss_bytes": 15851589632,
+      "proc_rss_bytes": 2760704,
+      "gpus": [
+        {
+          "index": 0,
+          "memory_used_mb": 1957,
+          "memory_total_mb": 6141,
+          "util_pct": 0
+        }
+      ]
+    }
+  ]
+}
